@@ -452,17 +452,92 @@ function LoginPage({ onBack, onSuccess }) {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
 
-  const handleSubmit = (event) => {
-    event.preventDefault();
-    setError("");
-    if (!email.trim() || !password || (mode === "signup" && !name.trim())) {
-      setError(mode === "signup" ? "Complete all fields to continue." : "Enter your email and password to continue.");
+ const handleSubmit = async (event) => {
+  event.preventDefault();
+  setError("");
+
+  if (
+    !email.trim() ||
+    !password ||
+    (mode === "signup" && !name.trim())
+  ) {
+    setError(
+      mode === "signup"
+        ? "Complete all fields to continue."
+        : "Enter your email and password to continue."
+    );
+    return;
+  }
+
+  try {
+    // If user is signing up, create the account first
+    if (mode === "signup") {
+      const signupResponse = await fetch(
+        "http://localhost:5000/api/auth/signup",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            name: name.trim(),
+            email: email.trim(),
+            password,
+          }),
+        }
+      );
+
+      const signupData = await signupResponse.json();
+
+      if (!signupResponse.ok) {
+        setError(signupData.message || "Could not create account.");
+        return;
+      }
+    }
+
+    // Login after signup, or login normally
+    const loginResponse = await fetch(
+      "http://localhost:5000/api/auth/login",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim(),
+          password,
+        }),
+      }
+    );
+
+    const loginData = await loginResponse.json();
+
+    if (!loginResponse.ok) {
+      setError(loginData.message || "Could not log in.");
       return;
     }
-    // Demo-only session; this is not real authentication and no password is saved.
-    try { localStorage.setItem("codesync-demo-session", JSON.stringify({ name: name.trim() || email.split("@")[0], email: email.trim(), signedInAt: new Date().toISOString() })); } catch {}
-    onSuccess();
-  };
+
+    // Save JWT for authenticated requests
+    localStorage.setItem("codesync-token", loginData.token);
+
+    // Save basic user information
+    localStorage.setItem(
+      "codesync-user",
+      JSON.stringify(loginData.user)
+    );
+
+    // Remove old guest/demo session if one exists
+    localStorage.removeItem("codesync-demo-session");
+
+    onSuccess(loginData.user);
+  } catch (error) {
+    console.error("Authentication error:", error);
+
+    setError(
+      "Could not connect to the CodeSync server. Please try again."
+    );
+  }
+};
 
   const handleDemo = () => {
     try {
@@ -523,7 +598,10 @@ function LoginPage({ onBack, onSuccess }) {
             <button className="yellow-button auth-submit" type="submit">{mode === "login" ? "Log in to CodeSync" : "Create account"}<ArrowRight size={17}/></button>
           </form>
           <div className="auth-divider"><span/> <small>OR CONTINUE YOUR JOURNEY</small> <span/></div>
-          <p className="auth-demo-note"><LockKeyhole size={14}/> Prototype preview: this form does not verify accounts yet.</p>
+          <p className="auth-demo-note">
+            <LockKeyhole size={14}/>
+            Account authentication powered by the CodeSync backend.
+          </p>
           <p className="auth-switch">{mode === "login" ? "New to CodeSync?" : "Already have an account?"} <button onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); }}>{mode === "login" ? "Create an account" : "Log in"}</button></p>
         </div>
       </section>
@@ -534,6 +612,56 @@ function LoginPage({ onBack, onSuccess }) {
 
 export default function App() {
   const [view, setView] = useState("landing");
+  const [authUser, setAuthUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+    useEffect(() => {
+      const restoreSession = async () => {
+        const token = localStorage.getItem("codesync-token");
+
+        // No real login token exists
+        if (!token) {
+          setAuthLoading(false);
+          return;
+        }
+
+        try {
+          const response = await fetch(
+            "http://localhost:5000/api/auth/me",
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            }
+          );
+
+          if (!response.ok) {
+            localStorage.removeItem("codesync-token");
+            localStorage.removeItem("codesync-user");
+            setAuthUser(null);
+            setAuthLoading(false);
+            return;
+          }
+
+          const data = await response.json();
+
+          setAuthUser(data.user);
+          setView("dashboard");
+
+          localStorage.setItem(
+            "codesync-user",
+            JSON.stringify(data.user)
+          );
+        } catch (error) {
+          console.error("Session restore error:", error);
+        } finally {
+          setAuthLoading(false);
+        }
+      };
+
+      restoreSession();
+    }, []);
+
   const [projects, setProjects] = useState(() => {
     try {
       const stored = JSON.parse(localStorage.getItem("codesync-projects-v1"));
@@ -561,6 +689,15 @@ export default function App() {
   const [projectName, setProjectName] = useState(() => currentProject?.name || "My First Project");
   const [savedMessage, setSavedMessage] = useState("Saved in this browser");
   const [dashboardSearch, setDashboardSearch] = useState("");
+
+  const handleLogout = () => {
+    localStorage.removeItem("codesync-token");
+    localStorage.removeItem("codesync-user");
+    localStorage.removeItem("codesync-demo-session");
+
+    setAuthUser(null);
+    setView("landing");
+  };
 
   useEffect(() => {
     try { localStorage.setItem("codesync-projects-v1", JSON.stringify(projects)); }
@@ -718,7 +855,19 @@ export default function App() {
 
 
 
-  if (view === "login") return <LoginPage onBack={() => setView("landing")} onSuccess={() => setView("dashboard")} />;
+ if (view === "login")
+  return (
+    <LoginPage
+      onBack={() => setView("landing")}
+      onSuccess={(user) => {
+        if (user) {
+          setAuthUser(user);
+        }
+
+        setView("dashboard");
+      }}
+    />
+  );
 
   if (view === "dashboard") {
     const filteredProjects = projects.filter((project) => project.name.toLowerCase().includes(dashboardSearch.toLowerCase()));
@@ -726,7 +875,7 @@ export default function App() {
       <div className="dashboard-page">
         <header className="dashboard-topbar">
           <button className="landing-brand dashboard-brand" onClick={() => setView("landing")}><span className="landing-logo"><Code2 size={21} /></span>Code<span>Sync</span></button>
-          <div className="dashboard-top-actions"><span className="local-badge"><span className="status-dot" /> Browser storage</span><button className="yellow-button" onClick={createProject}><CirclePlus size={17}/> New project</button></div>
+          <div className="dashboard-top-actions"><button className="auth-back" onClick={handleLogout}>Logout</button><span className="local-badge"><span className="status-dot" /> Browser storage</span><button className="yellow-button" onClick={createProject}><CirclePlus size={17}/> New project</button></div>
         </header>
         <main className="dashboard-main">
           <div className="dashboard-heading"><div><div className="eyebrow"><span className="eyebrow-dot"/> YOUR WORKSPACE</div><h1>My <span>Projects.</span></h1><p>Pick up where you left off, or start building something new.</p></div><div className="project-count"><FolderOpen size={18}/><strong>{projects.length}</strong><span>{projects.length === 1 ? "project" : "projects"}</span></div></div>
